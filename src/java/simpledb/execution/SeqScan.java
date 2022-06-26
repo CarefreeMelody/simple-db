@@ -20,6 +20,10 @@ public class SeqScan implements OpIterator {
 
     private static final long serialVersionUID = 1L;
 
+    private final TransactionId tid;
+    private int tableId;
+    private String tableAlias;
+    private DbFileIterator it;
     /**
      * Creates a sequential scan over the specified table as a part of the
      * specified transaction.
@@ -38,6 +42,9 @@ public class SeqScan implements OpIterator {
      */
     public SeqScan(TransactionId tid, int tableid, String tableAlias) {
         // some code goes here
+        this.tid = tid;
+        this.tableId = tableid;
+        this.tableAlias = tableAlias;
     }
 
     /**
@@ -55,7 +62,7 @@ public class SeqScan implements OpIterator {
     public String getAlias()
     {
         // some code goes here
-        return null;
+        return this.tableAlias;
     }
 
     /**
@@ -72,6 +79,8 @@ public class SeqScan implements OpIterator {
      */
     public void reset(int tableid, String tableAlias) {
         // some code goes here
+        this.tableId = tableid;
+        this.tableAlias = tableAlias;
     }
 
     public SeqScan(TransactionId tid, int tableId) {
@@ -80,6 +89,8 @@ public class SeqScan implements OpIterator {
 
     public void open() throws DbException, TransactionAbortedException {
         // some code goes here
+        it = Database.getCatalog().getDatabaseFile(tableId).iterator(tid);
+        it.open();
     }
 
     /**
@@ -94,26 +105,48 @@ public class SeqScan implements OpIterator {
      */
     public TupleDesc getTupleDesc() {
         // some code goes here
-        return null;
+        TupleDesc oldDesc = Database.getCatalog().getTupleDesc(tableId);
+        String[] names = new String[oldDesc.numFields()];
+        Type[] types = new Type[oldDesc.numFields()];
+
+        for (int i = 0; i < oldDesc.numFields(); ++i) {
+            names[i] = this.tableAlias + "." + oldDesc.getFieldName(i);
+            types[i] = oldDesc.getFieldType(i);
+        }
+
+        return new TupleDesc(types, names);
     }
 
     public boolean hasNext() throws TransactionAbortedException, DbException {
         // some code goes here
-        return false;
+        if (it == null) {
+            return false;
+        }
+        return it.hasNext();
     }
 
     public Tuple next() throws NoSuchElementException,
             TransactionAbortedException, DbException {
         // some code goes here
-        return null;
+        if (it == null) {
+            throw new NoSuchElementException("no next tuple");
+        }
+        Tuple t = it.next();
+        if (t == null) {
+            throw new NoSuchElementException("no next tuple");
+        }
+        return t;
     }
 
     public void close() {
         // some code goes here
+        it = null;
     }
 
     public void rewind() throws DbException, NoSuchElementException,
             TransactionAbortedException {
         // some code goes here
+        close();
+        open();
     }
 }

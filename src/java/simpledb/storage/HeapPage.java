@@ -73,8 +73,7 @@ public class HeapPage implements Page {
     */
     private int getNumTuples() {        
         // some code goes here
-        return 0;
-
+        return (int)Math.floor(BufferPool.getPageSize() * 8.0 / (td.getSize() * 8 + 1));
     }
 
     /**
@@ -82,10 +81,8 @@ public class HeapPage implements Page {
      * @return the number of bytes in the header of a page in a HeapFile with each tuple occupying tupleSize bytes
      */
     private int getHeaderSize() {        
-        
         // some code goes here
-        return 0;
-                 
+        return (int)Math.ceil(getNumTuples() / 8.0);
     }
     
     /** Return a view of this page before it was modified
@@ -118,7 +115,7 @@ public class HeapPage implements Page {
      */
     public HeapPageId getId() {
     // some code goes here
-    throw new UnsupportedOperationException("implement this");
+        return this.pid;
     }
 
     /**
@@ -288,15 +285,30 @@ public class HeapPage implements Page {
      */
     public int getNumEmptySlots() {
         // some code goes here
-        return 0;
+        int numUsedSlots = 0;
+        for (int i = 0; i < numSlots; ++i) {
+            if (isSlotUsed(i)) {
+                ++numUsedSlots;
+            }
+        }
+        return numSlots - numUsedSlots;
     }
 
     /**
      * Returns true if associated slot on this page is filled.
+     * @param i the ith-slot?
      */
     public boolean isSlotUsed(int i) {
         // some code goes here
-        return false;
+        // Small-Endian
+        int index = i / 8;
+        //if (index >= header.length) {
+        //    System.out.printf("i is %d and index is %d and tot is %d!", i, index, header.length);
+        //}
+        int offset = i % 8;
+        int bit = header[index];
+        bit = (bit >> offset) & 1;
+        return bit == 1;
     }
 
     /**
@@ -313,7 +325,13 @@ public class HeapPage implements Page {
      */
     public Iterator<Tuple> iterator() {
         // some code goes here
-        return null;
+        List<Tuple> filledTuples = new ArrayList<>();
+        for (int i = 0; i < numSlots; ++i) {
+            if (isSlotUsed(i)) {
+                filledTuples.add(tuples[i]);
+            }
+        }
+        return filledTuples.iterator();
     }
 
 }
