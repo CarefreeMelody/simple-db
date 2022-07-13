@@ -36,7 +36,54 @@ public class BufferPool {
     public static final int DEFAULT_PAGES = 50;
 
     private final int numPages;
-    private final ConcurrentHashMap<Integer, Page> pageStore;
+    private final ConcurrentHashMap<PageId, Node> pageStore;
+
+    private static class Node {
+        PageId pageId;
+        Page page;
+        Node prev;
+        Node next;
+        public Node() {}
+
+        public Node(PageId pageId, Page page) {
+            this.pageId = pageId;
+            this.page = page;
+        }
+
+        public PageId getPageId() {
+            return this.pageId;
+        }
+
+        public Page getPage() {
+            return this.page;
+        }
+    } 
+
+    private Node head;
+    private Node tail;
+
+    public void addToHead(Node node) {
+        node.prev = head;
+        node.next = head.next;
+        head.next.prev = node;
+        head.next = node;
+    }
+
+    public void remove(Node node) {
+        node.next.prev = node.prev;
+        node.prev.next = node.next;
+    }
+
+    public void moveToHead(Node node) {
+        remove(node);
+        addToHead(node);
+    }
+
+    public Node removeTail() {
+        Node node = tail.prev;
+        remove(node);
+        return node;
+    }
 
     /**
      * Creates a BufferPool that caches up to numPages pages.
@@ -47,6 +94,10 @@ public class BufferPool {
         // some code goes here
         this.numPages = numPages;
         this.pageStore = new ConcurrentHashMap<>();
+        this.head = new Node(new HeapPageId(-1, -1), null);
+        this.tail = new Node(new HeapPageId(-1, -1), null);
+        this.head.next = tail;
+        this.tail.prev = head;
     }
     
     public static int getPageSize() {
@@ -81,12 +132,19 @@ public class BufferPool {
     public  Page getPage(TransactionId tid, PageId pid, Permissions perm)
         throws TransactionAbortedException, DbException {
         // some code goes here
-        if (!pageStore.containsKey(pid.hashCode())) {
+        if (!pageStore.containsKey(pid)) {
             DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
             Page page = dbFile.readPage(pid);
-            pageStore.put(pid.hashCode(), page);
+            Node node = new Node(pid, page);
+            if (pageStore.size() > numPages) {
+                evictPage();
+            }
+            pageStore.put(pid, node);
+            addToHead(node);
+        }else {
+            moveToHead(pageStore.get(pid));
         }
-        return pageStore.get(pid.hashCode());
+        return pageStore.get(pid).getPage();
     }
 
     /**
@@ -156,10 +214,19 @@ public class BufferPool {
         for (Page modifiedPage : pages) {
             PageId pageId = modifiedPage.getId();
             modifiedPage.markDirty(true, tid);
-            if (pageStore.size() > numPages) {
-                evictPage();
+            if (!pageStore.containsKey(pageId)) {
+                Node node = new Node(pageId, modifiedPage);
+                if (pageStore.size() >= numPages) {
+                    evictPage();
+                }
+                addToHead(node);
+                pageStore.put(pageId, node);
+            }else {
+                Node node = pageStore.get(pageId);
+                moveToHead(node);
+                node.page = modifiedPage;
+                pageStore.put(pageId, node);
             }
-            pageStore.put(pageId.hashCode(), modifiedPage);
         }
     }
 
@@ -180,15 +247,25 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
+        // is necessary for lab2
         DbFile heapFile = Database.getCatalog().getDatabaseFile(t.getRecordId().getPageId().getTableId());
         List<Page> pages = heapFile.deleteTuple(tid, t);
         for (Page modifiedPage : pages) {
             PageId pageId = modifiedPage.getId();
             modifiedPage.markDirty(true, tid);
-            if (pageStore.size() > numPages) {
-                evictPage();
+            if (!pageStore.containsKey(pageId)) {
+                Node node = new Node(pageId, modifiedPage);
+                if (pageStore.size() >= numPages) {
+                    evictPage();
+                }
+                addToHead(node);
+                pageStore.put(pageId, node);
+            }else {
+                Node node = pageStore.get(pageId);
+                moveToHead(node);
+                node.page = modifiedPage;
+                pageStore.put(pageId, node);
             }
-            pageStore.put(pageId.hashCode(), modifiedPage);
         }
     }
 
@@ -214,6 +291,7 @@ public class BufferPool {
     public synchronized void discardPage(PageId pid) {
         // some code goes here
         // not necessary for lab1
+        pageStore.remove(pid);
     }
 
     /**
@@ -223,6 +301,13 @@ public class BufferPool {
     private synchronized  void flushPage(PageId pid) throws IOException {
         // some code goes here
         // not necessary for lab1
+        // is necessary for lab2
+        Page page = pageStore.get(pid).getPage();
+        if (page.isDirty() != null) {
+            HeapFile heapFile = (HeapFile) Database.getCatalog().getDatabaseFile(pid.getTableId());
+            heapFile.writePage(page);
+            page.markDirty(false, null);
+        }
     }
 
     /** Write all pages of the specified transaction to disk.
@@ -239,6 +324,14 @@ public class BufferPool {
     private synchronized  void evictPage() throws DbException {
         // some code goes here
         // not necessary for lab1
+        // is necessary for lab2
+        Page evictedPage = removeTail().getPage();
+        try {
+            flushPage(evictedPage.getId());
+        }catch (IOException e) {
+            e.printStackTrace();
+        }
+        discardPage(evictedPage.getId());
     }
 
 }
