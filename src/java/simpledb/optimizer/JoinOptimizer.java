@@ -124,13 +124,15 @@ public class JoinOptimizer {
         if (j instanceof LogicalSubplanJoinNode) {
             // A LogicalSubplanJoinNode represents a subquery.
             // You do not need to implement proper support for these for Lab 3.
+            // joincost(t1 join t2) = scancost(t1) + ntups(t1) x scancost(t2) // IO cost
+            //                      + ntups(t1) x ntups(t2) // CPU cost
             return card1 + cost1 + cost2;
         } else {
             // Insert your code here.
             // HINT: You may need to use the variable "j" if you implemented
             // a join algorithm that's more complicated than a basic
             // nested-loops join.
-            return -1.0;
+            return (double) (cost1 + card1 * cost2 + card1 * card2);
         }
     }
 
@@ -176,6 +178,21 @@ public class JoinOptimizer {
                                                    Map<String, Integer> tableAliasToId) {
         int card = 1;
         // some code goes here
+        if (joinOp == Predicate.Op.EQUALS) {
+            if (t1pkey && t2pkey) {
+                card = Math.min(card1, card2);
+            }else if (t1pkey) {
+                card = card2;
+            }else if (t2pkey) {
+                card = card1;
+            }else {
+                // it is difficult to estimate the cardinality of equivalent without primary keys
+                // , so the estimate is just a simple estimate of max(card1, card2)
+                card = Math.max(card1, card2);
+            }
+        }else {
+            card = (int) (0.3D * card1 * card2);
+        } 
         return card <= 0 ? 1 : card;
     }
 
@@ -238,7 +255,31 @@ public class JoinOptimizer {
 
         // some code goes here
         //Replace the following
-        return joins;
+        PlanCache planCache = new PlanCache();
+        CostCard bestCostCard = new CostCard();
+        int sz = joins.size();
+        for (int i = 1; i <= sz; ++i) {
+            Set<Set<LogicalJoinNode>> subSets = enumerateSubsets(joins, i);
+            for (Set<LogicalJoinNode> subSet : subSets) {
+                double bestCostSoFar = Double.MAX_VALUE;
+                bestCostCard = new CostCard();
+                for (LogicalJoinNode removedJoinNode : subSet) {
+                    CostCard costCard = computeCostAndCardOfSubplan(stats, filterSelectivities, removedJoinNode, 
+                                                                    subSet, bestCostSoFar, planCache);
+                    if (costCard != null) {
+                        bestCostSoFar = costCard.cost;
+                        bestCostCard = costCard;
+                    }
+                }
+                if (bestCostSoFar != Double.MAX_VALUE) {
+                    planCache.addPlan(subSet, bestCostCard.cost, bestCostCard.card, bestCostCard.plan);
+                }
+            }
+            if (explain) {
+                printJoins(bestCostCard.plan, planCache, stats, filterSelectivities);
+            }
+        }
+        return bestCostCard.plan;
     }
 
     // ===================== Private Methods =================================
