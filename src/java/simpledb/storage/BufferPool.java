@@ -310,7 +310,7 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid) {
         // some code goes here
         // not necessary for lab1|lab2
-        lockManager.completeTransaction(tid);
+        transactionComplete(tid, true);
     }
 
     /** Return true if the specified transaction has a lock on the specified page */
@@ -330,6 +330,33 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid, boolean commit) {
         // some code goes here
         // not necessary for lab1|lab2
+        if (commit) {
+            try {
+                flushPages(tid);
+            }catch (IOException e) {
+                e.printStackTrace();
+            }
+        }else {
+            transactionRollback(tid);
+        }
+        
+        // release all locks this transaction hold
+        lockManager.completeTransaction(tid);
+    }
+
+    public synchronized void transactionRollback(TransactionId tid) {
+        for (Node node : pageStore.values()) {
+            PageId pid = node.getPageId();
+            Page page = node.getPage();
+            if (tid.equals(page.isDirty())) {
+                int tableId = pid.getTableId();
+                DbFile table = Database.getCatalog().getDatabaseFile(tableId);
+                Page oldPageFromDisk = table.readPage(pid);
+                node.page = oldPageFromDisk;
+                pageStore.put(pid, node);
+                moveToHead(node);
+            }
+        }
     }
 
     /**
@@ -358,7 +385,7 @@ public class BufferPool {
             modifiedPage.markDirty(true, tid);
             if (!pageStore.containsKey(pageId)) {
                 Node node = new Node(pageId, modifiedPage);
-                if (pageStore.size() >= numPages) {
+                if (pageStore.size() > numPages) {
                     evictPage();
                 }
                 addToHead(node);
@@ -412,14 +439,16 @@ public class BufferPool {
     }
 
     /**
-     * Flush all dirty pages to disk.
+     * Flush all dirty pages to disk whitout committing transaction
      * NB: Be careful using this routine -- it writes dirty data to disk so will
      *     break simpledb if running in NO STEAL mode.
      */
     public synchronized void flushAllPages() throws IOException {
         // some code goes here
         // not necessary for lab1
-
+        for (PageId pid : pageStore.keySet()) {
+            flushPage(pid);
+        }
     }
 
     /** Remove the specific page id from the buffer pool.
@@ -457,6 +486,13 @@ public class BufferPool {
     public synchronized  void flushPages(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
+        for (Node node : pageStore.values()) {
+            PageId pageId = node.getPageId();
+            Page page = node.getPage();
+            if (tid.equals(page.isDirty())) {
+                flushPage(pageId);
+            }
+        }
     }
 
     /**
@@ -467,13 +503,20 @@ public class BufferPool {
         // some code goes here
         // not necessary for lab1
         // is necessary for lab2
-        Page evictedPage = removeTail().getPage();
-        try {
-            flushPage(evictedPage.getId());
-        }catch (IOException e) {
-            e.printStackTrace();
+        for (int i = 0; i < numPages; ++i) {
+            Node tail = removeTail();
+            Page evictedPage = tail.getPage();
+            if (evictedPage.isDirty() != null) {
+                addToHead(tail);
+            }else {
+                // it is not allowed to flush dirty pages back to disk
+                // before a transaction commits.
+                // flushPage(evictedPage.getId());
+                discardPage(evictedPage.getId());
+                return;
+            }
         }
-        discardPage(evictedPage.getId());
+        throw new DbException("All pages are dirty.");
     }
 
 }
