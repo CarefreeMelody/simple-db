@@ -37,7 +37,7 @@ public class BufferPool {
 
     /** the maximum time to wait a lock which is occupied by another transaction. 
     if the time is exceeded, rollback the transaction. */
-    private static final int ACQUIRING_LOCK_TIMEOUT = 500;
+    private static final long LOCK_WAIT_TIMEOUT = 2000L;
 
     private final int numPages;
     private final ConcurrentHashMap<PageId, Node> pageStore;
@@ -264,10 +264,13 @@ public class BufferPool {
         int requiredLockType = (perm == Permissions.READ_ONLY) ? PageLock.SHARE : PageLock.EXCLUSIVE;
         long startTime = System.currentTimeMillis();
         boolean isAcquired = false;
+        // keep on acquiring the lock
         while (!isAcquired) {
             isAcquired = lockManager.acquiredLock(pid, tid, requiredLockType);
             long currTime = System.currentTimeMillis();
-            if (currTime - startTime > ACQUIRING_LOCK_TIMEOUT) {
+            // a timeout indicates a deadlock occurred
+            // XXX:can use graph to detect deadlock
+            if (currTime - startTime > LOCK_WAIT_TIMEOUT) {
                 throw new TransactionAbortedException();
             }
         }
