@@ -333,6 +333,7 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid, boolean commit) {
         // some code goes here
         // not necessary for lab1|lab2
+        // force mode, no need to contain a redo log
         if (commit) {
             try {
                 flushPages(tid);
@@ -381,8 +382,8 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
-        DbFile heapFile = Database.getCatalog().getDatabaseFile(tableId);
-        List<Page> pages = heapFile.insertTuple(tid, t);
+        DbFile dbfile = Database.getCatalog().getDatabaseFile(tableId);
+        List<Page> pages = dbfile.insertTuple(tid, t);
         for (Page modifiedPage : pages) {
             PageId pageId = modifiedPage.getId();
             modifiedPage.markDirty(true, tid);
@@ -420,8 +421,8 @@ public class BufferPool {
         // some code goes here
         // not necessary for lab1
         // is necessary for lab2
-        DbFile heapFile = Database.getCatalog().getDatabaseFile(t.getRecordId().getPageId().getTableId());
-        List<Page> pages = heapFile.deleteTuple(tid, t);
+        DbFile dbfile = Database.getCatalog().getDatabaseFile(t.getRecordId().getPageId().getTableId());
+        List<Page> pages = dbfile.deleteTuple(tid, t);
         for (Page modifiedPage : pages) {
             PageId pageId = modifiedPage.getId();
             modifiedPage.markDirty(true, tid);
@@ -465,7 +466,10 @@ public class BufferPool {
     public synchronized void discardPage(PageId pid) {
         // some code goes here
         // not necessary for lab1
-        pageStore.remove(pid);
+        if (pageStore.containsKey(pid)) {
+            remove(pageStore.get(pid));
+            pageStore.remove(pid);
+        }
     }
 
     /**
@@ -478,8 +482,8 @@ public class BufferPool {
         // is necessary for lab2
         Page page = pageStore.get(pid).getPage();
         if (page.isDirty() != null) {
-            HeapFile heapFile = (HeapFile) Database.getCatalog().getDatabaseFile(pid.getTableId());
-            heapFile.writePage(page);
+            DbFile dbfile = Database.getCatalog().getDatabaseFile(pid.getTableId());
+            dbfile.writePage(page);
             page.markDirty(false, null);
         }
     }

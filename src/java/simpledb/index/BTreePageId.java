@@ -17,6 +17,7 @@ public class BTreePageId implements PageId {
 
 	private final int tableId;
 	private final int pgNo;
+    // identify the type of BTreePage
 	private final int pgcateg;
 
 	static public String categToString(int categ) {

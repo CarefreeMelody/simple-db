@@ -188,7 +188,27 @@ public class BTreeFile implements DbFile {
                                        Field f)
 					throws DbException, TransactionAbortedException {
 		// some code goes here
-        return null;
+        int currPageType = pid.pgcateg();
+        if (currPageType == BTreePageId.LEAF) {
+            return (BTreeLeafPage) getPage(tid, dirtypages, pid, perm);
+        }
+        // use getPage() to lock all internal nodes along the path to the leaf node with READ_ONLY permission
+        BTreeInternalPage internalPage = (BTreeInternalPage) getPage(tid, dirtypages, pid, Permissions.READ_ONLY);
+
+        if (f == null) {
+            BTreeEntry entry = internalPage.iterator().next();
+            return findLeafPage(tid, dirtypages, entry.getLeftChild(), perm, f);
+        }
+
+        Iterator<BTreeEntry> it = internalPage.iterator();
+        BTreeEntry entry = null;
+        while (it.hasNext()) {
+            entry = it.next();
+            if (f.compare(Op.LESS_THAN_OR_EQ, entry.getKey())) {
+                return findLeafPage(tid, dirtypages, entry.getLeftChild(), perm, f);
+            }
+        }
+        return findLeafPage(tid, dirtypages, entry.getRightChild(), perm, f);
 	}
 	
 	/**
@@ -239,8 +259,42 @@ public class BTreeFile implements DbFile {
 		// the new entry.  getParentWithEmtpySlots() will be useful here.  Don't forget to update
 		// the sibling pointers of all the affected leaf pages.  Return the page into which a 
 		// tuple with the given key field should be inserted.
-        return null;
-		
+        BTreeLeafPage newRightPage = (BTreeLeafPage) getEmptyPage(tid, dirtypages, BTreePageId.LEAF);
+        int numTuples = page.getNumTuples();
+        Iterator<Tuple> rit = page.reverseIterator();
+        for (int i = 0; i < numTuples >> 1; ++i) {
+            Tuple tuple = rit.next();
+            page.deleteTuple(tuple);
+            newRightPage.insertTuple(tuple);
+        }
+
+        BTreePageId oldRightPageId = page.getRightSiblingId();
+        BTreeLeafPage oldRightPage = oldRightPageId == null ? null 
+                        : (BTreeLeafPage) getPage(tid, dirtypages, oldRightPageId, Permissions.READ_ONLY);
+        if (oldRightPage != null) {
+            oldRightPage.setLeftSiblingId(newRightPage.getId());
+            newRightPage.setRightSiblingId(oldRightPageId);
+            dirtypages.put(oldRightPage.getId(), oldRightPage);
+        }
+
+        newRightPage.setLeftSiblingId(page.getId());
+        page.setRightSiblingId(newRightPage.getId());
+
+        dirtypages.put(page.getId(), page);
+        dirtypages.put(newRightPage.getId(), newRightPage);
+
+        BTreeInternalPage parent = getParentWithEmptySlots(tid, dirtypages, page.getParentId(), field);
+        Field mid = newRightPage.iterator().next().getField(keyField);
+        BTreeEntry newEntry = new BTreeEntry(mid, page.getId(), newRightPage.getId());
+        parent.insertEntry(newEntry);
+        dirtypages.put(parent.getId(), parent);
+
+        updateParentPointers(tid, dirtypages, parent);
+
+        if (field.compare(Op.GREATER_THAN_OR_EQ, mid)) {
+            return newRightPage;
+        }
+        return page;
 	}
 	
 	/**
@@ -277,7 +331,34 @@ public class BTreeFile implements DbFile {
 		// the parent pointers of all the children moving to the new page.  updateParentPointers()
 		// will be useful here.  Return the page into which an entry with the given key field
 		// should be inserted.
-		return null;
+        BTreeInternalPage newRightPage = (BTreeInternalPage) getEmptyPage(tid, dirtypages, BTreePageId.INTERNAL);
+        Iterator<BTreeEntry> rit = page.reverseIterator();
+        int numEntries = page.getNumEntries();
+        for (int i = 0; i < numEntries >> 1; ++i) {
+            BTreeEntry entry = rit.next();
+            page.deleteKeyAndRightChild(entry);
+            newRightPage.insertEntry(entry);
+        }
+
+        BTreeEntry mid = rit.next();
+        page.deleteKeyAndRightChild(mid);
+        mid.setLeftChild(page.getId());
+        mid.setRightChild(newRightPage.getId());
+        BTreeInternalPage parent = getParentWithEmptySlots(tid, dirtypages, page.getParentId(), mid.getKey());
+        parent.insertEntry(mid);
+
+        dirtypages.put(page.getId(), page);
+        dirtypages.put(newRightPage.getId(), newRightPage);
+        dirtypages.put(parent.getId(), parent);
+
+        updateParentPointers(tid, dirtypages, parent);
+        updateParentPointers(tid, dirtypages, page);
+        updateParentPointers(tid, dirtypages, newRightPage);
+
+        if (field.compare(Op.GREATER_THAN_OR_EQ, mid.getKey())) {
+            return newRightPage;
+        }
+        return page;
 	}
 	
 	/**
@@ -345,6 +426,8 @@ public class BTreeFile implements DbFile {
 	private void updateParentPointer(TransactionId tid, Map<PageId, Page> dirtypages, BTreePageId pid, BTreePageId child)
 			throws DbException, TransactionAbortedException {
 
+        // get a read lock temporarily because the child's pointer to parent may be correct.
+        // and if fetch child's page with a write-lock, it must be add to dirtypages.
 		BTreePage p = (BTreePage) getPage(tid, dirtypages, child, Permissions.READ_ONLY);
 
 		if(!p.getParentId().equals(pid)) {
@@ -563,12 +646,27 @@ public class BTreeFile implements DbFile {
 	 * @throws DbException
 	 */
 	public void stealFromLeafPage(BTreeLeafPage page, BTreeLeafPage sibling,
-			BTreeInternalPage parent, BTreeEntry entry, boolean isRightSibling) throws DbException {
+			BTreeInternalPage parent, BTreeEntry ParentEntry, boolean isRightSibling) throws DbException {
 		// some code goes here
         //
         // Move some of the tuples from the sibling to the page so
 		// that the tuples are evenly distributed. Be sure to update
 		// the corresponding parent entry.
+        Iterator<Tuple> it = isRightSibling ? sibling.iterator() : sibling.reverseIterator();
+        int currNumTuples = page.getNumTuples();
+        int siblingNumTuples = sibling.getNumTuples();
+        int targetNumTuples = (currNumTuples + siblingNumTuples) >> 1;
+
+        while (currNumTuples < targetNumTuples) {
+            Tuple tuple = it.next();
+            sibling.deleteTuple(tuple);
+            page.insertTuple(tuple);
+            ++currNumTuples;
+        }
+
+        Tuple mid = it.next();
+        ParentEntry.setKey(mid.getField(keyField));
+        parent.updateEntry(ParentEntry);
 	}
 
 	/**
@@ -648,6 +746,32 @@ public class BTreeFile implements DbFile {
 		// that the entries are evenly distributed. Be sure to update
 		// the corresponding parent entry. Be sure to update the parent
 		// pointers of all children in the entries that were moved.
+        Iterator<BTreeEntry> it = leftSibling.reverseIterator();
+        int curNumEntries = page.getNumEntries();
+        int siblingNumEntries = leftSibling.getNumEntries();
+        int targetNumEntries = (curNumEntries + siblingNumEntries) >> 1;
+
+        BTreeEntry leftSiblingLastEntry = it.next();
+        BTreeEntry stealNodeFromParent = new BTreeEntry(parentEntry.getKey(), leftSiblingLastEntry.getRightChild(), page.iterator().next().getLeftChild());
+        page.insertEntry(stealNodeFromParent);
+        ++curNumEntries;
+
+        while (curNumEntries < targetNumEntries) {
+            leftSibling.deleteKeyAndRightChild(leftSiblingLastEntry);
+            page.insertEntry(leftSiblingLastEntry);
+            leftSiblingLastEntry = it.next();
+            ++curNumEntries;
+        }
+
+        leftSibling.deleteKeyAndRightChild(leftSiblingLastEntry);
+        parentEntry.setKey(leftSiblingLastEntry.getKey());
+        parent.updateEntry(parentEntry);
+
+        dirtypages.put(page.getId(), page);
+        dirtypages.put(leftSibling.getId(), leftSibling);
+        dirtypages.put(parent.getId(), parent);
+
+        updateParentPointers(tid, dirtypages, page);
 	}
 	
 	/**
@@ -675,6 +799,36 @@ public class BTreeFile implements DbFile {
 		// that the entries are evenly distributed. Be sure to update
 		// the corresponding parent entry. Be sure to update the parent
 		// pointers of all children in the entries that were moved.
+        Iterator<BTreeEntry> it = rightSibling.iterator();
+        int currNumEntries = page.getNumEntries();
+        int rightSiblingNumEntries = rightSibling.getNumEntries();
+        int targetNumEntries = (currNumEntries + rightSiblingNumEntries) >> 1;
+
+        BTreeEntry rightSiblingFirstEntry = it.next();
+        BTreeEntry stealNodeFromParent = new BTreeEntry(
+            parentEntry.getKey(), 
+            page.reverseIterator().next().getRightChild(), 
+            rightSiblingFirstEntry.getLeftChild());
+        page.insertEntry(stealNodeFromParent);
+        ++currNumEntries;
+
+        BTreeEntry nextEntryFromRightSibling = rightSiblingFirstEntry;
+        while (currNumEntries < targetNumEntries) {
+            rightSibling.deleteKeyAndLeftChild(nextEntryFromRightSibling);
+            page.insertEntry(nextEntryFromRightSibling);
+            nextEntryFromRightSibling = it.next();
+            ++currNumEntries;
+        }
+
+        rightSibling.deleteKeyAndLeftChild(nextEntryFromRightSibling);
+        parentEntry.setKey(nextEntryFromRightSibling.getKey());
+        parent.updateEntry(parentEntry);
+
+        dirtypages.put(page.getId(), page);
+        dirtypages.put(rightSibling.getId(), rightSibling);
+        dirtypages.put(parent.getId(), parent);
+
+        updateParentPointers(tid, dirtypages, page);
 	}
 	
 	/**
@@ -705,6 +859,29 @@ public class BTreeFile implements DbFile {
 		// the sibling pointers, and make the right page available for reuse.
 		// Delete the entry in the parent corresponding to the two pages that are merging -
 		// deleteParentEntry() will be useful here
+        Iterator<Tuple> righLeafPageIterator = rightPage.iterator();
+        int numTuplesToMove = rightPage.getNumTuples();
+        Tuple tupleToMove = null;
+        for (int i = 0; i < numTuplesToMove; ++i) {
+            tupleToMove = righLeafPageIterator.next();
+            rightPage.deleteTuple(tupleToMove);
+            leftPage.insertTuple(tupleToMove);
+        }
+
+        BTreePageId rightSiblingPageId = rightPage.getRightSiblingId();
+        if (rightSiblingPageId != null) {
+            leftPage.setRightSiblingId(rightSiblingPageId);
+            BTreeLeafPage rightSiblingPage = (BTreeLeafPage) getPage(tid, dirtypages, rightSiblingPageId, Permissions.READ_WRITE);
+            rightSiblingPage.setLeftSiblingId(leftPage.getId());
+        }else {
+            leftPage.setRightSiblingId(null);
+        }
+         
+        setEmptyPage(tid, dirtypages, rightPage.getId().getPageNumber());
+        deleteParentEntry(tid, dirtypages, leftPage, parent, parentEntry);
+
+        dirtypages.put(leftPage.getId(), leftPage);
+        dirtypages.put(parent.getId(), parent);
 	}
 
 	/**
@@ -738,6 +915,26 @@ public class BTreeFile implements DbFile {
 		// and make the right page available for reuse
 		// Delete the entry in the parent corresponding to the two pages that are merging -
 		// deleteParentEntry() will be useful here
+        BTreeEntry pullNodeFromParent = new BTreeEntry(
+            parentEntry.getKey(), 
+            leftPage.reverseIterator().next().getRightChild(),
+            rightPage.iterator().next().getLeftChild());
+        leftPage.insertEntry(pullNodeFromParent);
+
+        Iterator<BTreeEntry> it = rightPage.iterator();
+        BTreeEntry entryToMove = null;
+        while (it.hasNext()) {
+            entryToMove = it.next();
+            rightPage.deleteKeyAndLeftChild(entryToMove);
+            leftPage.insertEntry(entryToMove);
+        }
+
+        updateParentPointers(tid, dirtypages, leftPage);
+        setEmptyPage(tid, dirtypages, rightPage.getId().getPageNumber());
+        deleteParentEntry(tid, dirtypages, leftPage, parent, parentEntry);
+
+        dirtypages.put(leftPage.getId(), leftPage);
+        dirtypages.put(parent.getId(), parent);
 	}
 	
 	/**
@@ -959,7 +1156,7 @@ public class BTreeFile implements DbFile {
 
 		// if this is the last page in the file (and not the only page), just 
 		// truncate the file
-		// @TODO: Commented out because we should probably do this somewhere else in case the transaction aborts....
+		// TODO: Commented out because we should probably do this somewhere else in case the transaction aborts....
 //		synchronized(this) {
 //			if(emptyPageNo == numPages()) {
 //				if(emptyPageNo <= 1) {
