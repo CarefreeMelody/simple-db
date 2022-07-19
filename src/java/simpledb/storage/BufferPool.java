@@ -4,6 +4,7 @@ import simpledb.common.Database;
 import simpledb.common.Permissions;
 import simpledb.common.DbException;
 import simpledb.common.DeadlockException;
+import simpledb.common.Debug;
 import simpledb.transaction.TransactionAbortedException;
 import simpledb.transaction.TransactionId;
 
@@ -70,66 +71,81 @@ public class BufferPool {
         ConcurrentHashMap<PageId, ConcurrentHashMap<TransactionId, PageLock>> lockMap = new ConcurrentHashMap<>();
 
         public synchronized boolean acquiredLock(PageId pageId, TransactionId tid, int requiredLockType) 
-            throws TransactionAbortedException {
-            // if there are no locks on this page
+            throws TransactionAbortedException{
+            final String lockType = requiredLockType == PageLock.SHARE ? "read lock" : "write lock";
+            final String currThread = Thread.currentThread().getName();
+
+            // if there are no locks on this page.
             if (!lockMap.containsKey(pageId)) {
                 PageLock pageLock = new PageLock(tid, requiredLockType);
                 ConcurrentHashMap<TransactionId, PageLock> pageLocks = new ConcurrentHashMap<>();
                 pageLocks.put(tid, pageLock);
                 lockMap.put(pageId, pageLocks);
+                Debug.log(currThread + ": the " + pageId + " have no lock, transaction " + tid + "require" + lockType + ", ACCEPT");
                 return true;
             }
 
+            // if there are some locks on this page.
             ConcurrentHashMap<TransactionId, PageLock> pageLocks = lockMap.get(pageId);
-            if (!pageLocks.containsKey(tid)) {
-                if (pageLocks.size() > 1) {
-                    if (requiredLockType == PageLock.SHARE) {
-                        PageLock pageLock = new PageLock(tid, requiredLockType);
-                        pageLocks.put(tid, pageLock);
-                        lockMap.put(pageId, pageLocks);
-                    }else if (requiredLockType == PageLock.EXCLUSIVE) {
-                        // tid try to acquire a exclusive-lock, refuse
-                        return false;
-                    }
-                }else if (pageLocks.size() == 1) {
-                    PageLock currLock = null;
-                    for (PageLock lock : pageLocks.values()) {
-                        currLock = lock;
-                    }
-                    if (currLock.getType() == PageLock.SHARE) {
-                        if (requiredLockType == PageLock.SHARE) {
-                            PageLock pageLock = new PageLock(tid, requiredLockType);
-                            pageLocks.put(tid, pageLock);
-                            lockMap.put(pageId, pageLocks);
-                        }else if (requiredLockType == PageLock.EXCLUSIVE) {
-                            return false;
-                        }
-                    }else if (currLock.getType() == PageLock.EXCLUSIVE) {
-                        return false;
-                    }
-                }
-            // if the tid has some locks in this page
-            }else {
-                PageLock currLock = pageLocks.get(tid);
-                if (currLock.getType() == PageLock.SHARE) {
-                    if (requiredLockType == PageLock.SHARE) {
-                        return true;
-                    }else if (requiredLockType == PageLock.EXCLUSIVE) {
-                        // if the page hold only one lock which is this transaction's share-lock
-                        if (pageLocks.size() == 1) {
-                            currLock.setType(PageLock.EXCLUSIVE);
-                            pageLocks.put(tid, currLock);
-                            return true;
-                        // other transactions hold locks and only share-locks(because current transaction hold the exclusive-lock)
-                        }else if (pageLocks.size() > 1) {
-                            throw new TransactionAbortedException();
-                        }
-                    }
-                // current transaction hold a exclusive-lock
-                }else if (currLock.getType() == PageLock.EXCLUSIVE){
+            // if current transaction hold some locks on this page.
+            if (pageLocks.containsKey(tid)) {
+                if (requiredLockType == PageLock.SHARE) {
+                    Debug.log(currThread + ": the " + pageId + " have one lock with same txid, transaction" + tid + " require " + lockType + ", ACCEPT");
                     return true;
                 }
+                if (requiredLockType == PageLock.EXCLUSIVE) {
+                    if (pageLocks.size() > 1) {
+                        Debug.log(currThread + ": the " + pageId + " have many read locks, transaction" + tid + " require write lock, ABORT!!!");
+                        throw new TransactionAbortedException();
+                    }
+                    if (pageLocks.size() == 1 && pageLocks.get(tid).getType() == PageLock.EXCLUSIVE) {
+                        Debug.log(currThread + ": the " + pageId + " have write lock with same txid, transaction" + tid + " require " + lockType + ", ACCEPT");
+                        return true;
+                    }
+                    if (pageLocks.size() == 1 && pageLocks.get(tid).getType() == PageLock.SHARE) {
+                        PageLock lockOfCurrTransaction = pageLocks.get(tid);
+                        lockOfCurrTransaction.setType(PageLock.EXCLUSIVE);
+                        pageLocks.put(tid, lockOfCurrTransaction);
+                        lockMap.put(pageId, pageLocks);
+                        Debug.log(currThread + ": the " + pageId + " have read lock with same txid, transaction" + tid + " require " + lockType + ", ACCEPT AND UPGRADE");
+                        return true;
+                    }
+                }
+            // if current transaction doesn't hold any lock on this page and other transactions has one or more locks.
+            }else {
+                if (requiredLockType == PageLock.SHARE) {
+                    // pageLocks.size() > 1 ==> locks of this page are share-lock.
+                    if (pageLocks.size() > 1) {
+                        PageLock lock = new PageLock(tid, requiredLockType);
+                        pageLocks.put(tid, lock);
+                        lockMap.put(pageId, pageLocks);
+                        Debug.log(currThread + ": the " + pageId + " have many read locks, transaction" + tid + " require " + lockType + ", ACCEPT AND ADD A NEW READ LOCK");
+                        return true;
+                    }
+                    // else pageLocks.size() == 1 ==> the only one lock may be share-lock or exclusive-lock.
+                    PageLock theOnlyOneLock = null;
+                    for (PageLock lock : pageLocks.values()) {
+                        theOnlyOneLock = lock;
+                    }
+    
+                    if (pageLocks.size() == 1 && theOnlyOneLock.getType() == PageLock.SHARE) {
+                        PageLock lock = new PageLock(tid, requiredLockType);
+                        pageLocks.put(tid, lock);
+                        lockMap.put(pageId, pageLocks);
+                        Debug.log(currThread + ": the " + pageId + " have one read lock with diff txid, transaction" + tid + " require " + lockType + ", ACCEPT AND ADD A NEW READ LOCK");
+                        return true;
+                    }
+                    if (pageLocks.size() == 1 && theOnlyOneLock.getType() == PageLock.EXCLUSIVE) {
+                        Debug.log(currThread + ": the " + pageId + " have one write lock with diff txid, transaction" + tid + " require read lock, AWAIT...");
+                        return false;
+                    }
+                }
+                if (requiredLockType == PageLock.EXCLUSIVE) {
+                    Debug.log(currThread + ": the " + pageId + " have lock with diff txid, transaction" + tid + " require write lock, AWAIT...");
+                    return false;
+                }
             }
+            Debug.log("<===============================other case==================================>");
             return false;
         }
 
@@ -145,16 +161,18 @@ public class BufferPool {
             return true;
         }
 
-        public synchronized boolean releaseLock(TransactionId tid, PageId pid) {
+        public synchronized void releaseLock(TransactionId tid, PageId pid) {
             if (isHoldLock(tid, pid)) {
+                final String currThread = Thread.currentThread().getName();
                 ConcurrentHashMap<TransactionId, PageLock> pageLocks = lockMap.get(pid);
+                final String lockType = pageLocks.get(tid).getType() == PageLock.SHARE ? "read lock" : "write lock";
                 pageLocks.remove(tid);
+                Debug.log(currThread + " release " + lockType + " in " + pid + ", the tx still holds " + pageLocks.size() + " lock, the txid is " + tid);
                 if (pageLocks.size() == 0) {
                     lockMap.remove(pid);
+                    Debug.log(currThread + " release last lock, the page " + pid + " have no lock, the page still holds " + pageLocks.size() + "lock, the txid is " + tid );
                 }
-                return true;
             }
-            return false;
         }
 
         public synchronized void completeTransaction(TransactionId tid) {
@@ -259,7 +277,7 @@ public class BufferPool {
      * @param perm the requested permissions on the page
      */
     public  Page getPage(TransactionId tid, PageId pid, Permissions perm)
-        throws TransactionAbortedException, DbException {
+        throws TransactionAbortedException, DbException{
         // some code goes here
         int requiredLockType = (perm == Permissions.READ_ONLY) ? PageLock.SHARE : PageLock.EXCLUSIVE;
         long startTime = System.currentTimeMillis();
