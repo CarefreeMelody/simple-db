@@ -14,12 +14,18 @@ import java.util.*;
 public class OrderBy extends Operator {
 
     private static final long serialVersionUID = 1L;
+    // 传入的运算符迭代器，用于遍历所有参与运算的 tuple
     private OpIterator child;
     private final TupleDesc td;
+    // OrderBy 的实现思路是在 OrderBy 迭代器 open() 后将数据源 child 的所有 tuple 移动到 List<Tuple> 中进行排序
     private final List<Tuple> childTups = new ArrayList<>();
+    // 依据 tuple 的第 orderByField 个字段进行排序
     private final int orderByField;
+    // 待排序的字段名
     private final String orderByFieldName;
+    // childTups 返回的迭代器，后续的 fetchNext() 就是调用 it.next() 取得排完序的 tuples
     private Iterator<Tuple> it;
+    // true : 升序; false : 降序
     private final boolean asc;
 
     /**

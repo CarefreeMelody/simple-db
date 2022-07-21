@@ -47,6 +47,13 @@ public class Predicate implements Serializable {
 
     }
     
+    // 利用传入的 tuple 的第 fieldno 个字段来与操作数字段 operand 来进行 op 操作
+    // 比如：select * from students where id > 2
+    // 其中, 假设 id 是传入 tuple 的第0个字段，则 
+    // fieldno = 0
+    // op = Op.GREATER_THAN
+    // operand = new intField(2)
+
     private int fieldno;
     private Op op;
     private Field operand;

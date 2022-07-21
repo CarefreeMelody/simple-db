@@ -109,36 +109,78 @@ public class Join extends Operator {
      * @return The next matching tuple.
      * @see JoinPredicate#filter
      */
-    private Tuple left;
+    private List<Tuple> joinBuffer = new ArrayList<>();
+    private Iterator<Tuple> bufferIterator = null;
+    private Tuple right = null;
+
     protected Tuple fetchNext() throws TransactionAbortedException, DbException {
         // some code goes here
-        while (child1.hasNext() || left != null) {
-            if (child1.hasNext() && left == null) {
-                left = child1.next();
-            }
-            Tuple right;
-            while (child2.hasNext()) {
+        if (right == null) {
+            if (child2.hasNext()) {
                 right = child2.next();
+            }else {
+                bufferIterator = null;
+                return null;
+            }
+        }
+
+        if (joinBuffer.isEmpty()) {
+            while (child1.hasNext()) {
+                joinBuffer.add(child1.next());
+            }
+        }
+
+        if (bufferIterator == null) {
+            bufferIterator = joinBuffer.iterator();
+        }
+
+        while (right != null) {
+            while (bufferIterator.hasNext()) {
+                Tuple left = bufferIterator.next();
                 if (jp.filter(left, right)) {
-                    int leftLen = left.getTupleDesc().numFields();
-                    int rightLen = right.getTupleDesc().numFields();
-                    Tuple validTuple = new Tuple(getTupleDesc());
-                    int len = getTupleDesc().numFields();
-                    for (int i = 0; i < leftLen; ++i) {
-                        validTuple.setField(i, left.getField(i));
+                    int leftNumFields = left.getTupleDesc().numFields();
+                    int rightNumFields = right.getTupleDesc().numFields();
+                    Tuple joinTuple = new Tuple(getTupleDesc());
+                    for (int i = 0; i < leftNumFields; ++i) {
+                        joinTuple.setField(i, left.getField(i));
                     }
-                    for (int j = 0; j < rightLen; ++j) {
-                        validTuple.setField(leftLen + j, right.getField(j));
+                    for (int j = 0; j < rightNumFields; ++j) {
+                        joinTuple.setField(leftNumFields + j, right.getField(j));
                     }
-                    System.out.println(validTuple.toString());
-                    return validTuple;
+                    System.out.println(jp.getOperator() + " " + joinTuple);
+                    return joinTuple;
                 }
             }
-            left = null;
-            //reset the iterator
-            child2.rewind();
+            bufferIterator = joinBuffer.iterator();
+            right = child2.hasNext() ? child2.next() : null;
         }
         return null;
+
+        //while (child1.hasNext() || left != null) {
+        //    if (child1.hasNext() && left == null) {
+        //        left = child1.next();
+        //    }
+        //    Tuple right;
+        //    while (child2.hasNext()) {
+        //        right = child2.next();
+        //        if (jp.filter(left, right)) {
+        //            int leftLen = left.getTupleDesc().numFields();
+        //            int rightLen = right.getTupleDesc().numFields();
+        //            Tuple validTuple = new Tuple(getTupleDesc());
+        //            for (int i = 0; i < leftLen; ++i) {
+        //                validTuple.setField(i, left.getField(i));
+        //            }
+        //            for (int j = 0; j < rightLen; ++j) {
+        //                validTuple.setField(leftLen + j, right.getField(j));
+        //            }
+        //            System.out.println(validTuple.toString());
+        //            return validTuple;
+        //        }
+        //    }
+        //    left = null;
+        //    //reset the iterator
+        //    child2.rewind();
+        //}
     }
 
     @Override
